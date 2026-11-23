@@ -247,7 +247,7 @@ async def _build_daily_mix() -> dict:
 
     mix_state["stage"] = "Скачиваю треки"
     for m in tracks:
-        downloader.enqueue(m["id"], m)
+        downloader.enqueue(m["id"], m, priority=2)
     asyncio.create_task(_write_m3u_when_ready("Микс дня", [m["id"] for m in tracks]))
     return data
 

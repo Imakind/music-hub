@@ -72,25 +72,76 @@ _conn.executescript(
 
 # ---------- задачи воркера ----------
 
-def add_job(kind: str, track_id: int, meta: dict, video_id: str | None = None) -> int:
+def _migrate():
+    tcols = {r["name"] for r in _conn.execute("PRAGMA table_info(tracks)")}
+    if "kept" not in tcols:
+        # kept=1: трек в «Моей музыке» (слушали, лайкнули, скачали вручную). kept=0: просто кэш.
+        _conn.execute("ALTER TABLE tracks ADD COLUMN kept INTEGER NOT NULL DEFAULT 0")
+        _conn.execute("UPDATE tracks SET kept=1 WHERE status='ready'")  # всё, что было до кэша, оставляем
+    jcols = {r["name"] for r in _conn.execute("PRAGMA table_info(jobs)")}
+    if "priority" not in jcols:
+        _conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 1")
+    _conn.commit()
+
+
+_migrate()
+
+# Приоритеты (меньше — раньше): 0 — пользователь ждёт, 1 — следующие в очереди,
+# 2 — фоновый прогрев микса, 3 — векторы звучания
+DEFAULT_PRIORITY = {"resolve": 0, "fetch": 1, "embed": 3}
+
+
+def add_job(kind: str, track_id: int, meta: dict, video_id: str | None = None,
+            priority: int | None = None) -> int:
     now = time.time()
+    if priority is None:
+        priority = DEFAULT_PRIORITY.get(kind, 1)
     with _lock:
         row = _conn.execute(
-            "SELECT id, video_id, state FROM jobs WHERE kind=? AND track_id=? AND state IN ('pending','running') "
-            "ORDER BY id DESC LIMIT 1", (kind, track_id)).fetchone()
+            "SELECT id, video_id, state, priority FROM jobs WHERE kind=? AND track_id=? "
+            "AND state IN ('pending','running') ORDER BY id DESC LIMIT 1", (kind, track_id)).fetchone()
         if row and (row["video_id"] == video_id or (row["state"] == "pending" and kind == "fetch")):
-            if row["state"] == "pending" and row["video_id"] != video_id and video_id:
-                _conn.execute("UPDATE jobs SET video_id=?, updated=? WHERE id=?", (video_id, now, row["id"]))
-                _conn.commit()
+            if row["state"] == "pending":
+                sets, args = [], []
+                if priority < row["priority"]:  # трек ждут срочнее, чем планировали
+                    sets.append("priority=?"); args.append(priority)
+                if video_id and row["video_id"] != video_id:
+                    sets.append("video_id=?"); args.append(video_id)
+                if sets:
+                    _conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id=?", (*args, row["id"]))
+                    _conn.commit()
             return row["id"]
         cur = _conn.execute(
-            "INSERT INTO jobs(kind, track_id, meta, video_id, state, created, updated) VALUES (?,?,?,?,?,?,?)",
-            (kind, track_id, json.dumps(meta, ensure_ascii=False), video_id, "pending", now, now))
+            "INSERT INTO jobs(kind, track_id, meta, video_id, state, created, updated, priority) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (kind, track_id, json.dumps(meta, ensure_ascii=False), video_id, "pending", now, now, priority))
         _conn.commit()
         return cur.lastrowid
 
 
-def claim_jobs(kinds: list[str], n: int, lease: float = 900) -> list[dict]:
+def job_failures(track_id: int) -> int:
+    with _lock:
+        return _conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='fetch' AND track_id=? AND state='error'",
+                             (track_id,)).fetchone()[0]
+
+
+def set_kept(track_id: int):
+    with _lock:
+        _conn.execute("UPDATE tracks SET kept=1 WHERE id=?", (track_id,))
+        _conn.commit()
+
+
+def all_ready():
+    with _lock:
+        rows = _conn.execute("SELECT * FROM tracks WHERE status='ready' ORDER BY added_at DESC").fetchall()
+    return [_row(r) for r in rows]
+
+
+def kept_tracks():
+    return [r for r in all_ready() if r["kept"]]
+
+
+def claim_jobs(kinds: list[str], n: int, lease: float = 600) -> list[dict]:
     """Выдать воркеру до n задач. Зависшие (lease секунд без отчёта) выдаются повторно."""
     now = time.time()
     if not kinds:
@@ -99,7 +150,7 @@ def claim_jobs(kinds: list[str], n: int, lease: float = 900) -> list[dict]:
     with _lock:
         rows = _conn.execute(
             f"SELECT * FROM jobs WHERE kind IN ({q}) AND (state='pending' OR (state='running' AND updated<?)) "
-            "ORDER BY CASE kind WHEN 'fetch' THEN 0 WHEN 'resolve' THEN 1 ELSE 2 END, id LIMIT ?",
+            "ORDER BY priority, CASE kind WHEN 'fetch' THEN 0 WHEN 'resolve' THEN 1 ELSE 2 END, id LIMIT ?",
             (*kinds, now - lease, n)).fetchall()
         ids = [r["id"] for r in rows]
         if ids:
@@ -141,6 +192,15 @@ def pending_jobs() -> dict[str, int]:
         rows = _conn.execute(
             "SELECT kind, COUNT(*) c FROM jobs WHERE state IN ('pending','running') GROUP BY kind").fetchall()
     return {r["kind"]: r["c"] for r in rows}
+
+
+def release_running_jobs() -> int:
+    """Воркер перезапустился: всё, что он делал, возвращаем в очередь сразу, без ожидания lease."""
+    with _lock:
+        n = _conn.execute("UPDATE jobs SET state='pending' WHERE state='running'").rowcount
+        _conn.execute("UPDATE tracks SET status='queued' WHERE status IN ('resolving','downloading')")
+        _conn.commit()
+    return n
 
 
 def reset_stuck_jobs():

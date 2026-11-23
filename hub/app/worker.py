@@ -16,6 +16,7 @@ import base64
 import logging
 import os
 import sys
+import time
 
 import httpx
 
@@ -50,6 +51,12 @@ class Worker:
 
     async def run(self):
         log.info("воркер подключается к %s, задачи: %s", SERVER_URL, ", ".join(self.kinds))
+        try:
+            r = await self.post("/worker/hello")
+            if r.get("released"):
+                log.info("вернул в очередь %d незавершённых задач прошлого запуска", r["released"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("hello не удался: %s", e)
         backoff = POLL
         while True:
             try:
@@ -99,15 +106,30 @@ class Worker:
         cands = await downloader.resolve(tid, meta)
         if cands:
             await self.post(f"/worker/jobs/{jid}/candidates", candidates=cands)
-        chosen = next((c for c in cands if c["video_id"] == job["video_id"]), None) if job.get("video_id") else None
-        chosen = chosen or ({"video_id": job["video_id"], "title": job["video_id"], "score": 0}
-                            if job.get("video_id") else (cands[0] if cands else None))
-        if not chosen:
+        if job.get("video_id"):  # источник выбран вручную — пробуем только его
+            chosen = next((c for c in cands if c["video_id"] == job["video_id"]), None)
+            tries = [chosen or {"video_id": job["video_id"], "title": job["video_id"], "score": 0}]
+        else:
+            # YouTube иногда отвечает 403 на конкретное видео: тогда берём следующего кандидата
+            tries = [c for c in cands[:3] if c.get("score", 0) >= cands[0].get("score", 0) - 40] if cands else []
+        if not tries:
             raise RuntimeError("источник не найден")
-        await self.post(f"/worker/jobs/{jid}/status", status="downloading", source_id=chosen["video_id"],
-                        source_title=chosen["title"], source_score=chosen.get("score"))
-        async with downloader._dl_sem:
-            path = await asyncio.to_thread(downloader._fetch_and_tag, meta, chosen["video_id"])
+        path, chosen, errors = None, None, []
+        t0 = time.monotonic()
+        for cand in tries:
+            await self.post(f"/worker/jobs/{jid}/status", status="downloading", source_id=cand["video_id"],
+                            source_title=cand["title"], source_score=cand.get("score"))
+            try:
+                async with downloader._dl_sem:
+                    path = await asyncio.to_thread(downloader._fetch_and_tag, meta, cand["video_id"])
+                chosen = cand
+                break
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{cand['video_id']}: {str(e)[-120:]}")
+                log.warning("источник %s не скачался (%s), пробую следующий", cand["video_id"], str(e)[-80:])
+        if not path:
+            raise RuntimeError("все источники не скачались: " + " | ".join(errors))
+        t_dl = time.monotonic() - t0
         try:
             r = await self.http.put(
                 f"/worker/jobs/{jid}/file", content=_file_chunks(path),
@@ -122,7 +144,8 @@ class Worker:
                     d.rmdir()
                 except OSError:
                     break
-        log.info("готово: %s → сервер (%d КБ)", label, r.json().get("size", 0) // 1024)
+        log.info("готово: %s → сервер (%d КБ; скачивание %.0f с, загрузка %.0f с)", label,
+                 r.json().get("size", 0) // 1024, t_dl, time.monotonic() - t0 - t_dl)
 
 
 def main():

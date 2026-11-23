@@ -46,6 +46,16 @@ async def claim(body: Claim):
     return {"jobs": [{k: j[k] for k in ("id", "kind", "track_id", "meta", "video_id")} for j in jobs]}
 
 
+@router.post("/hello")
+async def hello():
+    """Воркер только что запустился. Воркер один, поэтому его прежние незавершённые задачи
+    (компьютер уснул, перезагрузился) сразу возвращаются в очередь."""
+    n = library.release_running_jobs()
+    if n:
+        log.info("воркер перезапущен: %d задач возвращено в очередь", n)
+    return {"released": n}
+
+
 def _job(job_id: int) -> dict:
     j = library.get_job(job_id)
     if not j:

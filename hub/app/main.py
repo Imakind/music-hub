@@ -16,16 +16,20 @@ from .config import HUB_MODE, WEB_DIR, WORKER_TOKEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 if HUB_MODE == "server":
-    library.reset_stuck_jobs()  # очередь переживает перезапуск
+    library.release_running_jobs()  # очередь переживает перезапуск; «качается» без воркера → «в очереди»
 else:
     library.reset_stuck()
 
 
 @asynccontextmanager
 async def lifespan(_app):
-    task = asyncio.create_task(recommender.daily_scheduler(int(os.environ.get("MIX_HOUR", "6"))))
+    from . import cache
+    tasks = [asyncio.create_task(recommender.daily_scheduler(int(os.environ.get("MIX_HOUR", "6")))),
+             asyncio.create_task(cache.warm_mix_loop()),
+             asyncio.create_task(cache.housekeeping_loop())]
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="Music Hub", lifespan=lifespan)
@@ -121,9 +125,42 @@ async def prefetch(body: Ids):
 
 
 @app.post("/api/tracks/{track_id}/fetch")
-async def fetch(track_id: int):
+async def fetch(track_id: int, priority: int = 0, keep: bool = False):
     meta = await full_meta(track_id)
-    return {"status": downloader.enqueue(track_id, meta)}
+    status = downloader.enqueue(track_id, meta, priority=priority)
+    if keep:
+        library.set_kept(track_id)
+    return {"status": status}
+
+
+class Warm(BaseModel):
+    ids: list[int]
+    priority: int = 1
+    keep: bool = False
+
+
+@app.post("/api/cache/warm")
+async def cache_warm(body: Warm):
+    """Скачать заранее. Плеер просит так следующие треки очереди (приоритет 1),
+    кнопка «Скачать альбом» ещё и оставляет их в «Моей музыке» (keep)."""
+    ids = list(dict.fromkeys(body.ids))[:30]
+    out = {}
+    for i in ids:
+        row = library.get(i)
+        if row and row["status"] == "ready" and library.local_path(row):
+            out[i] = "ready"
+        else:
+            # полные метаданные (с номером трека) нужны для имени файла; Deezer кэшируется
+            out[i] = downloader.enqueue(i, await full_meta(i), priority=max(0, min(body.priority, 2)))
+        if body.keep:
+            library.set_kept(i)
+    return {"statuses": out}
+
+
+@app.get("/api/cache")
+async def cache_info():
+    from . import cache
+    return await asyncio.to_thread(cache.stats)
 
 
 @app.get("/api/tracks/{track_id}")
@@ -148,7 +185,7 @@ async def candidates(track_id: int, refresh: bool = False):
 async def set_source(track_id: int, body: Source):
     """Перекачать трек из выбранного вручную источника."""
     meta = await full_meta(track_id)
-    return {"status": downloader.enqueue(track_id, meta, video_id=body.video_id)}
+    return {"status": downloader.enqueue(track_id, meta, video_id=body.video_id, priority=0)}
 
 
 @app.delete("/api/tracks/{track_id}")
@@ -165,7 +202,7 @@ async def delete(track_id: int):
 async def lib():
     out = []
     rt = library.ratings()
-    for r in library.ready_tracks():
+    for r in library.kept_tracks():
         m = r["meta"]
         m["status"] = "ready"
         m["rating"] = rt.get(r["id"], 0)
@@ -194,6 +231,8 @@ async def event(e: Event):
         meta = await full_meta(e.track_id)
         library.cache_meta([meta])
     library.add_event(e.track_id, meta["artist"]["id"], e.type, e.position)
+    if e.type in ("play", "complete", "like"):
+        library.set_kept(e.track_id)  # послушали или лайкнули: остаётся в «Моей музыке»
     if e.wave and e.wave in recommender.waves:
         await recommender.wave_event(recommender.waves[e.wave], e.track_id, e.type)
     # считаем вектор заранее, чтобы профиль строился быстро

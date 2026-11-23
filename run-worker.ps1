@@ -19,8 +19,16 @@ if (Test-Path $envFile) {
 if (-not $env:SERVER_URL -or -not $env:WORKER_TOKEN) {
     Write-Host "Задайте SERVER_URL и WORKER_TOKEN в .env" -ForegroundColor Yellow; exit 1
 }
+# Свежий PATH из реестра: чтобы находился только что установленный Deno (JS для проверок YouTube)
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+if (-not (Get-Command deno -ErrorAction SilentlyContinue)) {
+    Write-Host "Совет: установите Deno (winget install DenoLand.Deno) — с ним YouTube реже отвечает 403." -ForegroundColor Yellow
+}
 # Воркер всегда работает в обычном режиме; серверный режим только у сервера
 Remove-Item Env:HUB_MODE -ErrorAction SilentlyContinue
+# Плеер заранее просит ~5 следующих треков: качаем по 3 одновременно, берём до 6 задач
+if (-not $env:MAX_DOWNLOADS) { $env:MAX_DOWNLOADS = "3" }
+if (-not $env:WORKER_CAPACITY) { $env:WORKER_CAPACITY = "6" }
 
 & $py -m pip install -q -U yt-dlp ytmusicapi   # YouTube часто ломает старые версии
 

@@ -1,5 +1,5 @@
 // Кэшируем только оболочку приложения; API и звук всегда идут в сеть.
-const CACHE = "shell-v1";
+const CACHE = "shell-v2";
 const SHELL = ["/", "/style.css", "/app.js", "/icon.svg", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {

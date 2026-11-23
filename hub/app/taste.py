@@ -88,7 +88,7 @@ def compute_stats() -> tuple[dict[int, TrackStat], dict[int, int]]:
     for tid, val in ratings.items():
         stats[tid].like = val > 0
         stats[tid].dislike = val < 0
-    for r in library.ready_tracks():
+    for r in library.kept_tracks():
         stats[r["id"]]  # создать запись
         artist_of.setdefault(r["id"], r["meta"]["artist"]["id"])
     for s in stats.values():

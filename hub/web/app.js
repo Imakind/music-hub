@@ -93,7 +93,9 @@ let mixPoll;
 async function renderHome() {
   lists = {};
   clearTimeout(mixPoll);
-  const [{ mix, state }, prof, wk] = await Promise.all([api("/api/mix/daily"), api("/api/profile"), api("/api/worker").catch(() => null)]);
+  const [{ mix, state }, prof, wk, cs] = await Promise.all([api("/api/mix/daily"), api("/api/profile"),
+    api("/api/worker").catch(() => null), api("/api/cache").catch(() => null)]);
+  const cacheHtml = cs ? `<div class="muted" style="font-size:12px">В «Моей музыке» ${cs.kept} · в кэше ${cs.cached} (${cs.cache_mb} МБ из ${cs.cache_limit_gb} ГБ)${cs.queued ? ` · качается ${cs.queued}` : ""}</div>` : "";
   const jobs = wk ? Object.values(wk.pending).reduce((a, b) => a + b, 0) : 0;
   const workerHtml = wk && wk.mode === "server" ? `<div class="muted" style="font-size:12px">Домашний компьютер: ${wk.online ? "на связи" : "выключен"}${jobs ? ` · в очереди задач: ${jobs}` : ""}</div>` : "";
   if (state.running) mixPoll = setTimeout(() => current?.name === "home" && render(current), 3000);
@@ -125,6 +127,7 @@ async function renderHome() {
       <div class="chips">${prof.top_artists.filter((a) => a.weight > 0).map((a) => `<span class="chip">${esc(a.name)}</span>`).join("") || `<span class="muted">Послушайте несколько треков</span>`}</div>
       <div class="muted" style="font-size:12px">Анализ звучания: ${emb.enabled ? `${esc(emb.model)}${emb.device ? " · " + esc(emb.device) : ""}` : "выключен — " + esc(emb.reason || "")}</div>
       ${workerHtml}
+      ${cacheHtml}
     </div></div>
     ${mix?.tracks?.length ? `<h2>Микс дня</h2>${trackList(mix.tracks, { listId: "mix" })}` : ""}`;
 }
@@ -205,8 +208,11 @@ function bindView() {
   };
   view.querySelectorAll("[data-download]").forEach((b) => (b.onclick = async () => {
     const l = lists[b.dataset.download];
-    for (const t of l) { if (t.status !== "ready") { api(`/api/tracks/${t.id}/fetch`, { method: "POST" }).catch(() => {}); watch(t.id); } }
-    toast(`Скачиваю ${l.length} треков`);
+    // «Скачать альбом» — в «Мою музыку» насовсем (keep), не в кэш
+    const need = l.filter((t) => t.status !== "ready");
+    api("/api/cache/warm", { method: "POST", body: JSON.stringify({ ids: l.map((t) => t.id), priority: 1, keep: true }) })
+      .then(() => need.forEach((t) => watch(t.id))).catch((e) => toast(e.message));
+    toast(need.length ? `Скачиваю ${need.length} треков` : "Альбом уже скачан");
   }));
   // заранее подобрать источники для видимых треков
   const ids = Object.values(lists).flat().filter((t) => !t.status).map((t) => t.id);
@@ -287,12 +293,14 @@ async function startWave(body) {
 }
 let waveLoading = false;
 async function topUpWave() {
-  if (!wave || waveLoading || qi < queue.length - 2) return;
+  // держим в волне запас не меньше окна кэша, чтобы следующие треки успевали скачаться
+  if (!wave || waveLoading || queue.length - 1 - qi > PREFETCH_AHEAD) return;
   waveLoading = true;
   try {
-    const r = await api(`/api/wave/${wave}/next?n=3`);
+    const r = await api(`/api/wave/${wave}/next?n=${PREFETCH_AHEAD + 1 - (queue.length - 1 - qi)}`);
     const have = new Set(queue.map((t) => t.id));
     queue.push(...r.tracks.filter((t) => !have.has(t.id)));
+    prepareNext();
     saveQ();
     if (current?.name === "queue") render(current);
   } catch (e) {
@@ -350,7 +358,9 @@ async function playIndex(i) {
   audio.pause();
   setState("Подготовка…");
   try {
-    await ensureReady(t);
+    const ready = ensureReady(t);   // текущий трек запрашиваем первым (приоритет 0)
+    setTimeout(prepareNext, 800);    // следом — окно следующих, не дожидаясь текущего
+    await ready;
     if (playingId() !== t.id) return; // пользователь уже переключил
     audio.src = `/api/stream/${t.id}`;
     await audio.play();
@@ -373,9 +383,23 @@ async function playIndex(i) {
   }
 }
 
+// Кэш: заранее качаем несколько следующих треков очереди, чтобы переключение было мгновенным
+const PREFETCH_AHEAD = 5;
+const warmed = new Map(); // id → когда просили (не дёргать сервер повторно)
 function prepareNext() {
-  const n = queue[qi + 1];
-  if (n && n.status !== "ready") api(`/api/tracks/${n.id}/fetch`, { method: "POST" }).then(() => watch(n.id)).catch(() => {});
+  const now = Date.now();
+  const next = queue.slice(qi + 1, qi + 1 + PREFETCH_AHEAD)
+    .filter((t) => t.status !== "ready" && !(now - (warmed.get(t.id) || 0) < 60000));
+  if (!next.length) return;
+  next.forEach((t) => warmed.set(t.id, now));
+  api("/api/cache/warm", { method: "POST", body: JSON.stringify({ ids: next.map((t) => t.id), priority: 1 }) })
+    .then((r) => {
+      for (const [id, st] of Object.entries(r.statuses)) {
+        updateDots(+id, st);
+        if (st !== "ready") watch(+id);
+      }
+    })
+    .catch(() => next.forEach((t) => warmed.delete(t.id)));
 }
 
 function showTrack(t) {

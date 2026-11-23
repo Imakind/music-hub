@@ -82,15 +82,18 @@ async def resolve(track_id: int, meta: dict, force: bool = False) -> list[dict]:
 
 # ---------- скачивание ----------
 
-def enqueue(track_id: int, meta: dict, video_id: str | None = None) -> str:
-    """Поставить трек в очередь. Возвращает текущий статус."""
+def enqueue(track_id: int, meta: dict, video_id: str | None = None, priority: int = 1) -> str:
+    """Поставить трек в очередь. Возвращает текущий статус.
+    priority (только на сервере): 0 — играет сейчас, 1 — следующие, 2 — фоновый прогрев."""
     row = library.get(track_id)
     if row and row["status"] == "ready" and not video_id and library.local_path(row):
         return "ready"
     if HUB_MODE == "server":
-        library.upsert(track_id, meta, status="queued", error=None)
-        library.add_job("fetch", track_id, meta, video_id)
-        return "queued"
+        busy = row["status"] if row and row["status"] in ("queued", "resolving", "downloading") else None
+        if not busy:
+            library.upsert(track_id, meta, status="queued", error=None)
+        library.add_job("fetch", track_id, meta, video_id, priority=priority)  # повтор поднимает приоритет
+        return busy or "queued"
     if track_id in _tasks and not _tasks[track_id].done():
         return row["status"] if row else "queued"
     library.upsert(track_id, meta, status="queued", error=None)
