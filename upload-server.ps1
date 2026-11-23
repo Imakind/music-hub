@@ -7,10 +7,13 @@ param(
     [string]$Key,
     [switch]$WithLibrary
 )
-$ErrorActionPreference = "Stop"
+# ssh/scp пишут предупреждения в stderr; в Windows PowerShell 5.1 это не должно прерывать скрипт,
+# поэтому результат проверяем по коду возврата
+$ErrorActionPreference = "Continue"
 $root = $PSScriptRoot
 $ssh = @(); if ($Key) { $ssh = @("-i", $Key) }
-$opts = @("-o", "StrictHostKeyChecking=accept-new")
+$opts = @("-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR")
+function Assert-Ok($what) { if ($LASTEXITCODE -ne 0) { throw "Не удалось: $what (код $LASTEXITCODE)" } }
 
 if (-not (Test-Path (Join-Path $root "server.env"))) {
     Write-Host "Нет файла server.env (настройки сервера). Создайте его по .env.server.example." -ForegroundColor Yellow; exit 1
@@ -19,16 +22,17 @@ if (-not (Test-Path (Join-Path $root "server.env"))) {
 # Docker на сервере ставится в фоне при первом запуске (AWS user-data): дождёмся
 $waited = 0
 while ($waited -lt 300) {
-    ssh @ssh @opts $Server "test -f ~/.hub-ready || (command -v docker >/dev/null && test -d ~/player)" 2>$null
+    ssh @ssh @opts $Server "test -f ~/.hub-ready" 2>$null
     if ($LASTEXITCODE -eq 0) { break }
     Write-Host "Жду, пока сервер установит Docker…"; Start-Sleep 15; $waited += 15
 }
 
 $tgz = Join-Path $env:TEMP "player-deploy.tgz"
-tar -czf $tgz -C $root --exclude=.venv --exclude=__pycache__ hub docker-compose.server.yml
-scp @ssh @opts $tgz "${Server}:player-deploy.tgz"
-ssh @ssh @opts $Server "mkdir -p ~/player/data/hub && tar -xzf ~/player-deploy.tgz -C ~/player && rm ~/player-deploy.tgz"
-scp @ssh @opts (Join-Path $root "server.env") "${Server}:player/.env"
+tar -czf $tgz -C $root --exclude=.venv --exclude=__pycache__ hub docker-compose.server.yml; Assert-Ok "упаковка проекта"
+scp @ssh @opts $tgz "${Server}:player-deploy.tgz"; Assert-Ok "загрузка архива"
+ssh @ssh @opts $Server "mkdir -p ~/player/data/hub && tar -xzf ~/player-deploy.tgz -C ~/player && rm ~/player-deploy.tgz"; Assert-Ok "распаковка на сервере"
+scp @ssh @opts (Join-Path $root "server.env") "${Server}:player/.env"; Assert-Ok "загрузка server.env"
+ssh @ssh @opts $Server "chmod 600 ~/player/.env"
 Remove-Item $tgz
 
 if ($WithLibrary) {
