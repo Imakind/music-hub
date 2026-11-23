@@ -1,0 +1,55 @@
+services:
+  # Хранилище и Subsonic-сервер: «полка с пластинками»
+  navidrome:
+    image: deluan/navidrome:latest
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      ND_SCANNER_SCHEDULE: "@every 1m"
+      ND_LOGLEVEL: info
+      ND_DEFAULTLANGUAGE: ru
+    volumes:
+      - ./data/navidrome:/data
+      - ./music:/music:ro
+
+  # Поиск, подбор источника, скачивание и веб-плеер: «продавец»
+  hub:
+    build:
+      context: ./hub
+      args:
+        EMBEDDINGS: "1"
+        TORCH_INDEX: https://download.pytorch.org/whl/cpu   # для NVIDIA: .../whl/cu128
+    restart: unless-stopped
+    # Видеокарта NVIDIA для эмбеддера (нужен NVIDIA Container Toolkit / Docker Desktop + WSL2):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NAVIDROME_URL: http://navidrome:4533
+    volumes:
+      - ./music:/music
+      - ./data/hub:/data
+    depends_on:
+      - navidrome
+
+  # Постоянный публичный адрес через Cloudflare Tunnel (нужен токен из панели Cloudflare).
+  # Запуск: docker compose --profile tunnel up -d
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - hub

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f0f12">
+  <title>Плеер</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <button class="icon-btn" id="back" aria-label="Назад" hidden>
+      <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <form id="search-form" role="search">
+      <svg viewBox="0 0 24 24" class="search-ico"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="Исполнитель, трек или альбом" autocomplete="off" enterkeyhint="search">
+    </form>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="home" class="active">Главная</button>
+    <button data-tab="search">Поиск</button>
+    <button data-tab="library">Моя музыка</button>
+    <button data-tab="queue">Очередь</button>
+  </nav>
+
+  <main id="view"></main>
+
+  <footer id="player" hidden>
+    <div class="progress" id="progress"><div id="progress-fill"></div></div>
+    <div class="player-row">
+      <img id="p-cover" alt="">
+      <div class="p-meta">
+        <div id="p-title"></div>
+        <div id="p-artist"></div>
+      </div>
+      <button class="icon-btn" id="p-dislike" aria-label="Не нравится" title="Не нравится"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M6 18L18 6"/></svg></button>
+      <button class="icon-btn" id="p-like" aria-label="Нравится" title="Нравится"><svg viewBox="0 0 24 24"><path d="M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.5-7 10-7 10z"/></svg></button>
+      <button class="icon-btn" id="p-wave" aria-label="Волна по треку" title="Моя волна по этому треку"><svg viewBox="0 0 24 24"><path d="M2 12c2-4 4-4 6 0s4 4 6 0 4-4 6 0"/></svg></button>
+      <button class="icon-btn" id="p-prev" aria-label="Предыдущий"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5L9 12l10 7z"/></svg></button>
+      <button class="icon-btn big" id="p-play" aria-label="Играть"><svg viewBox="0 0 24 24" id="p-play-ico"></svg></button>
+      <button class="icon-btn" id="p-next" aria-label="Следующий"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
+    </div>
+    <div class="p-time"><span id="t-cur">0:00</span><span id="p-state"></span><span id="t-dur">0:00</span></div>
+  </footer>
+
+  <dialog id="sources">
+    <form method="dialog" class="dlg">
+      <h3>Источники звука</h3>
+      <p class="muted" id="src-hint">Если версия оказалась с цензурой — выберите другую. Оценка учитывает Explicit, длительность и пометки «без цензуры», но не гарантирует результат.</p>
+      <div id="src-list"></div>
+      <div class="dlg-actions">
+        <button type="button" id="src-refresh">Искать заново</button>
+        <button value="close">Закрыть</button>
+      </div>
+    </form>
+  </dialog>
+
+  <audio id="audio" preload="auto"></audio>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

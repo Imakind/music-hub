@@ -1,0 +1,36 @@
+# Серверная часть: плеер, библиотека и рекомендации работают круглосуточно.
+# Скачивание и анализ звука выполняет домашний компьютер (run-worker.ps1).
+#
+#   docker compose -f docker-compose.server.yml up -d --build
+#
+# Нужен .env рядом с этим файлом (см. .env.server.example).
+services:
+  hub:
+    build:
+      context: ./hub
+      args:
+        EMBEDDINGS: "0"          # PyTorch на сервере не нужен: векторы считает домашний воркер
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HUB_MODE: server
+    volumes:
+      - ./music:/music
+      - ./data/hub:/data
+    expose:
+      - "8080"
+
+  # HTTPS с автоматическим сертификатом Let's Encrypt
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?укажите DOMAIN в .env}
+    command: caddy reverse-proxy --from ${DOMAIN} --to hub:8080
+    volumes:
+      - ./data/caddy:/data
+    depends_on:
+      - hub

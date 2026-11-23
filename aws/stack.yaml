@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Домашний стриминг: сервер для Hub (EC2 ARM + постоянный Elastic IP + Security Group).
+  Docker ставится при первом запуске; код проекта заливает upload-server.ps1 по SSH.
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Существующая пара ключей EC2 для SSH (EC2 -> Key Pairs)
+  AllowedSshCidr:
+    Type: String
+    Description: Откуда разрешён SSH, например 203.0.113.7/32 (ваш IP). Не оставляйте 0.0.0.0/0 без нужды.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.micro, t4g.small, t4g.medium]
+    Description: t4g.small (2 ГБ) — комфортный минимум для сборки Docker; t4g.micro (1 ГБ) тоже работает, но медленнее
+  VolumeSizeGiB:
+    Type: Number
+    Default: 40
+    MinValue: 20
+    MaxValue: 500
+    Description: Размер диска под музыку и базу (EBS gp3)
+  LatestUbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+
+Resources:
+  HubSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Hub - SSH, HTTP, HTTPS
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AllowedSshCidr, Description: SSH }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: HTTP (сертификат Let's Encrypt) }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+        - { IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTP/3 }
+      Tags:
+        - { Key: Name, Value: music-hub }
+
+  HubInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestUbuntuAmi
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt HubSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSizeGiB
+            DeleteOnTermination: false   # музыка переживёт удаление стека
+            Encrypted: true
+      MetadataOptions:
+        HttpTokens: required             # только IMDSv2
+      Tags:
+        - { Key: Name, Value: music-hub }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # swap, чтобы docker build не падал на маленьких инстансах
+          if [ ! -f /swapfile ]; then
+            fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+          curl -fsSL https://get.docker.com | sh
+          usermod -aG docker ubuntu
+          mkdir -p /home/ubuntu/player
+          chown ubuntu:ubuntu /home/ubuntu/player
+          touch /home/ubuntu/.hub-ready
+
+  HubElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref HubInstance
+      Tags:
+        - { Key: Name, Value: music-hub }
+
+Outputs:
+  PublicIp:
+    Value: !Ref HubElasticIp
+  Domain:
+    Description: Значение DOMAIN для server.env (HTTPS-адрес сертификат получит автоматически)
+    Value: !Join ["", [!Join ["-", !Split [".", !Ref HubElasticIp]], ".sslip.io"]]
+  SshCommand:
+    Value: !Sub "ssh -i <путь-к-ключу>.pem ubuntu@${HubElasticIp}"
+  UploadCommand:
+    Value: !Sub ".\\upload-server.ps1 -Server ubuntu@${HubElasticIp} -Key <путь-к-ключу>.pem -WithLibrary"

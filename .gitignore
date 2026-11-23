@@ -1,0 +1,13 @@
+music/
+data/
+.env
+hub/.venv/
+__pycache__/
+server.env
+*.pem
+*.key
+.env.*
+!.env.example
+!.env.server.example
+*.sqlite3
+*.log
